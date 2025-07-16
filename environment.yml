@@ -1,0 +1,14 @@
+name: pysolrad
+channels:
+  - defaults
+  - https://repo.anaconda.com/pkgs/main
+  - https://repo.anaconda.com/pkgs/r
+  - https://repo.anaconda.com/pkgs/msys2
+dependencies:
+  - python=3.13
+  - pyhdf
+  - pytables
+  - numba=0.61
+  - sunpy
+  - numpy=2.2
+  - h5py
