@@ -33,3 +33,6 @@ Notebooks:
 Folders:
 * `data`: data from Allen's Astrophysical Quantities, Nobeyama Radioheliograph, MURaM, and MAS
 * `out`: sunspot and full-disk images from `sunspot-synthesis` and `full-disk-synthesis` runs
+
+# Running the Notebooks
+Most notebooks require a local download of the MHD models. Instructions for downloading these models is included [here](models/models.md). Then, create and activate a conda environment using the instructions above.

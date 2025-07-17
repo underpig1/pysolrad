@@ -1,16 +1,16 @@
-# Models
+# Models and Download Instructions
 
 This folder contains pre-built solar atmospheric models for forward synthesis
 
-### MAS
+### [MAS](https://www.predsci.com/mas/)
 - Time-dependent magnetohydrodynamic (MHD) coronal model
 - Used for full-disk coronal imaging
-- Download PSI's MAS full-corona simulation for a given Carrington rotation: https://www.predsci.com/data/runs/
+- You can download PSI's MAS full-corona simulation for a given Carrington rotation here: https://www.predsci.com/data/runs/
+- Download `https://www.predsci.com/data/runs/cr[Carrington Rotation]-[medium/high]/hmi_mast_mas_std_0201 [or other]/corona.zip` to `models/MAS/corona`
 
-### MURaM
+### [MURaM](https://www2.mps.mpg.de/projects/solar-mhd/muram_site/)
 - MHD model
 - Used for sunspot imaging
-- Download MURaM high-resolution coronal simulation: https://asap.ucar.edu/software/muram/
 
 ### Allen's Solar Atmosphere
 - Empirical model used for 1D solar atmopsheric model
