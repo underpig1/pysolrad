@@ -366,7 +366,7 @@ class Image:
         self.faraday = self.faraday.reshape(new_shape)
         self.disp = self.disp.reshape(new_shape)
         self.unity = self.unity.reshape(new_shape)
-        self.uidx = self.uidx.reshape(new_shape)
+        self.uidx = np.int32(self.uidx.reshape(new_shape))
         self.shape = new_shape
         return self
 
