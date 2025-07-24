@@ -1,11 +1,15 @@
-# Python SOLar RADio Forward Synthesis Model
+# Python SOLar RADio Coronal Emission Forward Synthesis Model
 
-![](out/s11.png)
-Figure 1: Stokes IV maps from gyroresonance and bremsstrahlung coronal simulation of a synthetic MHD atmosphere above a sunspot
+![](out/sunspot-side.png)
+Figure 1: Generated maps from gyroresonance and bremsstrahlung coronal simulation of a synthetic MHD atmosphere, looking through the corona above a sunspot
 
-> pySOLRAD forward synthesizes the dominant forms of coronal radio emission through a model solar atmosphere in order to improve our current physical understanding of the solar corona. The model simulates the interaction of particles throughout a synthetic solar atmosphere to produce bremsstrahlung and gyroresonance radio emission, and then ray-traces the absorption and emission mechanisms of those signals to the observer. As a result, several synthetic observables are generated, each representing a prediction of how solar radio signals would appear on Earth from a radio telescope. Because the properties of observed radio waves are physically dependent on the parameters of the model (density, temperature, and magnetic field distributions), comparison of the outputted synthetic images with actual observations can be used to fine-tune these initial parameters and arrive at a much more complete understanding of the physical processes operating within the corona. The synthetic solar atmosphere given to pySOLRAD is typically one generated from a pre-built magnetohydrodynamic (MHD) coronal simulation, which provides distributions for magnetic field, temperature, and density throughout the corona.
+> Abstract:<br>pySOLRAD forward synthesizes the dominant forms of solar coronal radio emission through a model solar atmosphere. The model simulates the interaction of particles throughout a synthetic solar atmosphere to produce bremsstrahlung and gyroresonance radio emission, and then ray-traces the absorption and emission mechanisms of those signals to the observer. As a result, several synthetic observables are generated, each representing a prediction of how solar radio signals would appear on Earth from a radio telescope. Because the properties of observed radio waves are physically dependent on the parameters of the model (eg. density, temperature, and magnetic field distributions), comparison of the outputted synthetic images with actual observations can be used to fine-tune these initial parameters and arrive at a much more complete understanding of the physical processes operating within the corona. The synthetic solar atmosphere passed to pySOLRAD is typically one generated from a magnetohydrodynamic (MHD) coronal simulation, which provides distributions for magnetic field, temperature, and density throughout the corona. The goal of pySOLRAD is to to improve our current understanding of the physical processes operating within the solar corona, especially in the less well-understood regime of solar radio physics.
 
-Supports synthesis of bremsstrahlung (intensity and circular polarization), gyroresonance (intensity and circular polarization), and faraday rotation (linear polarization)
+# Features
+- Support synthesis and simulation of both bremsstrahlung and gyroresonance radio emission (dominant forms of solar radio emission) through any given 1D, 2D, or 3D artifical solar atmosphere
+- Generates maps, observables, and quantities for studying coronal intensity, circular/linear polarization, faraday rotation, dispersion measure, and optical depth
+- Handles conversions between flux, flux density, intensity, frequency, polarization, and length units
+- Well-documented with a wide range of examples
 
 # Scripts
 Create conda environment from cached `environment.yml`:

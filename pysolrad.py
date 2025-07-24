@@ -1,7 +1,79 @@
 import numpy as np
 from numba import njit, prange
 from numpy.typing import NDArray
-from typing import Optional
+import sys
+import time
+import threading
+
+class Wheel:
+    def __init__(self, text='working...', label="", total=None, delay=0.2):
+        self.text = text
+        self.chars = ['∙', '•', '●', '•']
+        self.chars = ['/', '⎯', '\\', '|']
+        self.label = label
+        self.total = total
+        self.delay = delay
+        self.progress = 0
+        self._lock = threading.Lock()
+        self._index = 0
+        self._running = False
+        self._thread = None
+    
+    def _write(self, done=False):
+        char = self.chars[self._index % len(self.chars)]
+        if done:
+            char = '⎯'
+        suffix = f"{self.progress}/{self.total} {self.label}" if self.total is not None else ""
+        sys.stdout.write(f"\r[{char}] - {self.text} {suffix}")
+        sys.stdout.flush()
+        if done:
+            sys.stdout.write("\n")
+
+    def _spin(self):
+        while self._running:
+            with self._lock:
+                self._write()
+                self._index += 1
+            time.sleep(self.delay)
+
+    def update(self):
+        with self._lock:
+            self.progress += 1
+
+    def start(self):
+        sys.stdout.write("\r")
+        sys.stdout.flush()
+        self._running = True
+        self._thread = threading.Thread(target=self._spin)
+        self._thread.daemon = True
+        self._thread.start()
+
+    def stop(self):
+        self._running = False
+        if self._thread:
+            self._thread.join()
+        self._write(done = True)
+    
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+    
+    def __call__(self, iterable):
+        self._iterable = iterable
+        self.total = self.total or len(iterable) if hasattr(iterable, '__len__') else None
+        self.start()
+        return self
+
+    def __iter__(self):
+        if self._iterable is None:
+            raise TypeError("Wheel must wrap an iterable to be used as an iterator.")
+        for item in self._iterable:
+            yield item
+            self.update()
+        self.stop()
 
 @njit
 def gyrotaus(v, s, ne, temp, theta_rad, dl):
@@ -191,20 +263,27 @@ def losint(ltemp, lbtot, lblos, lne, ldl, v, dogyro=False):
     V = (Tbr - Tbl) / 2.
     faraday = 2.63e-13 * rm * (3e8 / v)**2
     unity = 0.0
-    uidx = 0
+    unity_r, unity_l = 0.0, 0.0
+    uidx_r, uidx_l = 0, 0
     for uidx in range(npts - 1, -1, -1):
         dtaur, dtaul = integrands[:, uidx]
         taul += dtaul
         taur += dtaur
         unity += ldl[uidx]
-        if (taul + taur)/2 >= 1.0:
-            break
+        if taur >= 1.0 and unity_r == 0.0:
+            unity_r = unity
+            uidx_r = uidx
+        if taul >= 1.0 and unity_l == 0.0:
+            unity_l = unity
+            uidx_l = uidx
+    unity = (unity_r + unity_l)/2
+    uidx = (uidx_r + uidx_l)/2
     return np.array((I, V, faraday, disp, unity, uidx), dtype=np.float32)
 
 @njit(parallel=True)
 def apply_losint(ftemp, fbtot, fblos, fne, fdl, v, dogyro=False):
     """
-    Vectorized and parallelized line-of-sight synthesis for multiple rays.
+    Parallelized line-of-sight synthesis for multiple rays.
 
     Parameters
     ----------
@@ -238,6 +317,44 @@ def apply_losint(ftemp, fbtot, fblos, fne, fdl, v, dogyro=False):
     for i in prange(ftemp.shape[0]):
         out[i] = losint(ftemp[i], fbtot[i], fblos[i], fne[i], fdl[i], v, dogyro)
     return out
+
+@njit(parallel=True)
+def range_losint(ftemp, fbtot, fblos, fne, fdl, vs, dogyro=False):
+    """
+    Parallelized line-of-sight synthesis for multiple frequencies.
+
+    Parameters
+    ----------
+    ftemp : ndarray, shape (R, L)
+        Electron temperature [K] for all rays.
+    fbtot : ndarray, shape (R, L)
+        Total magnetic field [G] for all rays.
+    fblos : ndarray, shape (R, L)
+        Line-of-sight magnetic field component [G].
+    fne : ndarray, shape (R, L)
+        Electron number density [cm^-3].
+    fdl : ndarray, shape (R, L)
+        Path length elements [cm].
+    vs : ndarray, shape(F)
+        Wave frequencies to synthesize [Hz].
+    dogyro : bool, optional
+        Whether to include gyroresonance absorption (default False).
+
+    Returns
+    -------
+    out : ndarray, shape (F, R, 6)
+        Synthesized outputs for all rays:
+        - Stokes I [K]
+        - Stokes V [K]
+        - Faraday rotation [rad]
+        - Dispersion measure [pc cm^-3]
+        - Optical unity location [cm]
+        - Optical unity index
+    """
+    raw_imgs = np.empty((vs.shape[0], ftemp.shape[0], 6), dtype=np.float32)
+    for i in prange(vs.shape[0]):
+        raw_imgs[i] = apply_losint(ftemp, fbtot, fblos, fne, fdl, vs[i], dogyro)
+    return raw_imgs
 
 kB = 1.38e-16 # erg/K
 cc = 2.99792458e10 # cm/s
@@ -327,7 +444,13 @@ class Quantity(np.ndarray):
         raise TypeError("Only scalar Quantity can be converted to float.")
 
     def __repr__(self):
-        return f"{super().__repr__()} {self.unit}"
+        return f"{super().__repr__()}{self.unit}"
+    
+    def __str__(self):
+        if self.shape == ():
+            return f"{np.round(float(self), 2)} {self.unit}"
+        else:
+            return self.__repr__()
 
 class Image:
     """
@@ -339,12 +462,16 @@ class Image:
         Stokes I intensity image in Kelvin.
     V : Quantity
         Stokes V (circular polarization) image in Kelvin.
+    P
+        Fractional circular polarization (V/I)
     faraday : Quantity
         Faraday rotation angle in radians.
     disp : Quantity
         Dispersion measure in pc cm^-3.
     unity : Quantity
         Optical depth unity position in cm.
+    uidx : int
+        Index of optical unity position.
     shape : tuple
         Shape of the underlying data array.
     v : float
@@ -353,22 +480,89 @@ class Image:
     def __init__(self, pixels: NDArray[np.float32], v=None):
         self.I = Quantity(pixels[..., 0], 'K', v)
         self.V = Quantity(pixels[..., 1], 'K', v)
+        self.P = self.V/self.I
         self.faraday = Quantity(pixels[..., 2], 'rad') 
         self.disp = Quantity(pixels[..., 3], 'pc cm^-3')
         self.unity = Quantity(pixels[..., 4], 'cm')
         self.uidx = pixels[..., 5]
-        self.shape = pixels.shape
+        self.shape = pixels.shape[:-1]
         self.v = v
     
     def reshape(self, *new_shape):
         self.I = self.I.reshape(new_shape)
         self.V = self.V.reshape(new_shape)
+        self.P = self.P.reshape(new_shape)
         self.faraday = self.faraday.reshape(new_shape)
         self.disp = self.disp.reshape(new_shape)
         self.unity = self.unity.reshape(new_shape)
         self.uidx = np.int32(self.uidx.reshape(new_shape))
         self.shape = new_shape
         return self
+    
+class ImageCollection(list):
+    """
+    A container class for managing multiple Image instances at different frequencies. Supports vectorized operations on images.
+    """
+    def __init__(self, images: list[Image] | None = None):
+        super().__init__(images or [])
+
+    def reshape(self, *new_shape):
+        """
+        Reshape all images in the collection to the given shape.
+        """
+        for image in self:
+            image.reshape(*new_shape)
+        return self
+    
+    def _stack_attr(self, attr: str):
+        arrs = [getattr(img, attr) for img in self]
+        return np.stack(arrs)
+    
+    @property
+    def v(self) -> NDArray[np.float32]:
+        """
+        Return a list of frequency values (`v`) from all images in the collection.
+
+        Returns
+        -------
+        ndarray
+            The frequency `v` from each Image. If an Image has no `v`, None is returned for that Image.
+        """
+        return np.array([getattr(img, 'v', None) for img in self])
+
+    @property
+    def I(self):
+        return self._stack_attr('I')
+
+    @property
+    def V(self):
+        return self._stack_attr('V')
+    
+    @property
+    def P(self):
+        return self._stack_attr('P')
+
+    @property
+    def faraday(self):
+        return self._stack_attr('faraday')
+
+    @property
+    def disp(self):
+        return self._stack_attr('disp')
+
+    @property
+    def unity(self):
+        return self._stack_attr('unity')
+
+    @property
+    def uidx(self):
+        return self._stack_attr('uidx')
+    
+    @property
+    def shape(self):
+        if len(self) == 0:
+            raise ValueError("ImageCollection is empty, shape is undefined.")
+        return self[0].shape
 
 class RayCollection:
     """
@@ -385,7 +579,7 @@ class RayCollection:
     fblos : ndarray
         Flattened line-of-sight magnetic field array, shape (N, L).
     fne : ndarray
-        Flattened electron number density array, shape (N, L).
+        Flattened electron density array, shape (N, L).
     fdl : ndarray
         Flattened path length array, shape (N, L).
     """
@@ -402,11 +596,11 @@ class RayCollection:
         blos : ndarray
             Line-of-sight magnetic field strength array.
         ne : ndarray
-            Electron number density array.
+            Electron density array.
         dl : float or ndarray
             Path length per voxel along the integration direction.
         axis : int, default=-1
-            Axis along which to integrate (e.g., line-of-sight).
+            Axis along which to integrate (e.g., line-of-sight). A value of -1 (default) indicates last axis.
         """
         shape = temp.shape
         assert btot.shape == shape, "Quantities have mismatched shapes"
@@ -417,17 +611,23 @@ class RayCollection:
         else:
             assert dl.shape == shape, "Quantities have mismatched shapes"
 
-        fray = lambda arr: self._unravel(np.ascontiguousarray(arr), axis)
-        self.ftemp = fray(temp)
-        self.fbtot = fray(btot)
-        self.fblos = fray(blos)
-        self.fne = fray(ne)
-        self.fdl = fray(dl)
+        with Wheel("creating rays...", label="quantities", total=5) as wheel:
+            fray = lambda arr: self._unravel(np.ascontiguousarray(arr), axis)
+            self.ftemp = fray(temp)
+            wheel.update()
+            self.fbtot = fray(btot)
+            wheel.update()
+            self.fblos = fray(blos)
+            wheel.update()
+            self.fne = fray(ne)
+            wheel.update()
+            self.fdl = fray(dl)
+            wheel.update()
     
     def _unravel(self, arr, axis):
         axis = axis % arr.ndim
         arr_moved = np.moveaxis(arr, axis, -1)
-        self.shape = arr_moved.shape
+        self.shape = arr_moved.shape # (nrays, ray_npt)
         leading = np.prod(self.shape[:-1], dtype=int)
         trailing = self.shape[-1]
         new_shape = (leading, trailing)
@@ -435,7 +635,7 @@ class RayCollection:
 
 def synthesize(rays: RayCollection, v: np.float32 | float, dogyro:bool = False) -> Image:
     """
-    Performs line-of-sight synthesis to compute a multi-channel image.
+    Performs line-of-sight synthesis at a single frequency to compute a multi-channel image.
 
     Parameters
     ----------
@@ -449,8 +649,80 @@ def synthesize(rays: RayCollection, v: np.float32 | float, dogyro:bool = False) 
     Returns
     -------
     Image
-        A 2D image object containing Stokes I, V, Faraday rotation, dispersion, and optical unity position.
+        A 2D multi-channel image object containing Stokes I, V, Faraday rotation, dispersion, and optical unity position/index.
     """
-    fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro)
-    rimg = fimg_raw.reshape(*rays.shape[:-1], 6)
+    with Wheel("synthesizing...") as wheel:
+        fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro)
+        rimg = fimg_raw.reshape(*rays.shape[:-1], 6)
     return Image(rimg, v)
+
+def synthesize_range(rays: RayCollection, frequencies: list[float] | NDArray[np.float32], dogyro: bool = False) -> ImageCollection:
+    """
+    Performs line-of-sight synthesis for a range of frequencies using threads and a spinner.
+
+    Parameters
+    ----------
+    rays : RayCollection
+        Input ray collection with all physical parameters.
+    frequencies : list of float or ndarray
+        Frequencies in Hz at which the synthesis is performed.
+    dogyro : bool, default=False
+        Whether to include gyroresonance effects in the calculation.
+
+    Returns
+    -------
+    ImageCollection
+        A collection of synthesized images.
+    """
+    # results = ImageCollection()
+    # wheel = Wheel("synthesizing...", label="frequencies")
+    # for v in wheel(frequencies):
+    #     fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro)
+    #     rimg = fimg_raw.reshape(*rays.shape[:-1], 6)
+    #     img = Image(rimg, v)
+    #     results.append(img)
+    # return results
+    result = ImageCollection()
+    farr = np.array(frequencies, dtype=np.float32)
+    with Wheel("synthesizing...") as wheel:
+        fimgs_raw = range_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, farr, dogyro)
+        rimg = fimgs_raw.reshape(farr.shape[0], *rays.shape[:-1], 6)
+    for i in range(farr.shape[0]):
+        result.append(Image(rimg[i], farr[i]))
+    return result
+
+def get_spectral_idx(images: ImageCollection) -> NDArray[np.float32]:
+    vs_comp = images.v.reshape((-1,) + (1,) * len(images.shape))
+    Tb = images.I
+    dlogTb = np.gradient(np.log10(Tb), axis=0)
+    dlogv = np.gradient(np.log10(vs_comp), axis=0)
+    spectral_idx = -dlogTb/dlogv
+    return spectral_idx
+
+def invert_blos(images: ImageCollection) -> NDArray[np.float32]:
+    P = images.V/images.I
+    ndim = images[0].V.ndim
+    vs_comp = images.v.reshape((-1,) + (1,) * ndim)
+    spectral_idx = get_spectral_idx(images)
+    inverted_blos = ((P*vs_comp)/(2.8e6*spectral_idx)).astype(np.float32)
+    return inverted_blos
+
+def get_quantity_at_unity(rays: RayCollection, images: Image | ImageCollection, quantity: str) -> NDArray[np.float32]:
+    if isinstance(images, ImageCollection):
+        imgs = images
+    elif isinstance(images, Image):
+        imgs = ImageCollection([images])
+    else:
+        raise TypeError("images must be an Image or an ImageCollection")
+    n_imgs = len(imgs)
+    img_shape = imgs[0].shape
+    uidx_stack = np.stack([np.int32(img.uidx) for img in imgs], axis=0)
+    cube = getattr(rays, 'f' + quantity).reshape(*img_shape, -1)
+    cube_exp = cube[None, ...]
+    indices_exp = uidx_stack[..., None]
+    selected = np.take_along_axis(cube_exp, indices_exp, axis=-1)
+    at_unity = selected[..., 0]
+    if isinstance(images, Image):
+        return at_unity[0]
+    else:
+        return at_unity
