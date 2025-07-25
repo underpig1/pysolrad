@@ -770,7 +770,7 @@ def synthesize_range(rays: RayCollection, frequencies: list[float] | NDArray[np.
     wheel = Wheel("synthesizing...", label="frequencies")
     for v in wheel(frequencies):
         fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro)
-        rimg = fimg_raw.reshape(*rays.shape[:-1], 6)
+        rimg = fimg_raw.reshape(*rays.shape[:-1], 10)
         img = Image(rimg, v)
         results.append(img)
     return results
