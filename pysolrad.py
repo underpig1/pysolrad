@@ -748,7 +748,7 @@ def synthesize(rays: RayCollection, v: np.float32 | float, dogyro:bool = False) 
         rimg = fimg_raw.reshape(*rays.shape[:-1], 10)
     return Image(rimg, v)
 
-def  (rays: RayCollection, frequencies: list[float] | NDArray[np.float32], dogyro: bool = False) -> ImageCollection:
+def synthesize_range(rays: RayCollection, frequencies: list[float] | NDArray[np.float32], dogyro: bool = False) -> ImageCollection:
     """
     Performs line-of-sight synthesis for a range of frequencies.
 
@@ -773,7 +773,8 @@ def  (rays: RayCollection, frequencies: list[float] | NDArray[np.float32], dogyr
         rimg = fimg_raw.reshape(*rays.shape[:-1], 6)
         img = Image(rimg, v)
         results.append(img)
-    return result
+    return results
+
     # parallelized version
     # result = ImageCollection()
     # farr = np.array(frequencies, dtype=np.float32)
