@@ -1,3 +1,4 @@
+from typing import Literal
 import numpy as np
 from numba import njit, prange
 from numpy.typing import NDArray
@@ -23,10 +24,12 @@ class Wheel:
         char = self.chars[self._index % len(self.chars)]
         if done:
             char = '⎯'
-        suffix = f"{self.progress}/{self.total} {self.label}" if self.total is not None else ""
-        sys.stdout.write(f"\r[{char}] - {self.text} {suffix}")
+        suffix = f" {self.progress}/{self.total} {self.label}" if self.total is not None else ""
+        sys.stdout.write(f"\r[{char}] - {self.text}{suffix}")
         sys.stdout.flush()
         if done:
+            sys.stdout.write(f" - done")
+            sys.stdout.flush()
             sys.stdout.write("\n")
 
     def _spin(self):
@@ -231,20 +234,24 @@ def losint(ltemp, lbtot, lblos, lne, ldl, v, dogyro=False):
 
     Returns
     -------
-    result : ndarray, shape (6,)
+    result : ndarray, shape (10,)
         Output values:
         - Stokes I [K]
         - Stokes V [K]
         - Faraday rotation [rad]
         - Dispersion measure [pc cm^-3]
-        - Depth (distance) at optical unity surface [cm]
-        - Optical unity index
+        - Left-handed optical unity location [cm]
+        - Right-handed optical unity location [cm]
+        - Left-handed optical unity index
+        - Right-handed optical unity index
+        - Left-handed emissivity-weighted BLOS
+        - Right-handed emissivity-weighted BLOS
     """
     npts = ltemp.shape[0]
     Tbr = Tbl = 3.0
-    taur = taul = 0.0
     rm = disp = 0.0
     integrands = np.zeros((2, npts))
+    cfl, cfr = 0.0, 0.0
     for il in range(npts):
         ptemp = ltemp[il]
         pblos = lblos[il]
@@ -262,23 +269,32 @@ def losint(ltemp, lbtot, lblos, lne, ldl, v, dogyro=False):
     I = (Tbr + Tbl) / 2.
     V = (Tbr - Tbl) / 2.
     faraday = 2.63e-13 * rm * (3e8 / v)**2
-    unity = 0.0
+    depth = 0.0
     unity_r, unity_l = 0.0, 0.0
     uidx_r, uidx_l = 0, 0
-    for uidx in range(npts - 1, -1, -1):
-        dtaur, dtaul = integrands[:, uidx]
+    taur = taul = 0.0
+    num_l, denom_l, num_r, denom_r = 0.0, 0.0, 0.0, 0.0
+    for il in range(npts - 1, -1, -1):
+        ptemp = ltemp[il]
+        pblos = lblos[il]
+        dtaur, dtaul = integrands[:, il]
         taul += dtaul
         taur += dtaur
-        unity += ldl[uidx]
+        depth += ldl[il]
         if taur >= 1.0 and unity_r == 0.0:
-            unity_r = unity
-            uidx_r = uidx
+            unity_r = depth
+            uidx_r = il
         if taul >= 1.0 and unity_l == 0.0:
-            unity_l = unity
-            uidx_l = uidx
-    unity = (unity_r + unity_l)/2
-    uidx = (uidx_r + uidx_l)/2
-    return np.array((I, V, faraday, disp, unity, uidx), dtype=np.float32)
+            unity_l = depth
+            uidx_l = il
+        num_l += pblos*dtaul*ptemp*np.exp(-taul)
+        denom_l += dtaul*ptemp*np.exp(-taul)
+        num_r += pblos*dtaur*ptemp*np.exp(-taur)
+        denom_r += dtaur*ptemp*np.exp(-taur)
+    unity_r, unity_l = depth - unity_r, depth - unity_l
+    weighted_blos_l = num_l/denom_l
+    weighted_blos_r = num_r/denom_r
+    return np.array((I, V, faraday, disp, unity_r, uidx_r, unity_l, uidx_l, weighted_blos_r, weighted_blos_l), dtype=np.float32)
 
 @njit(parallel=True)
 def apply_losint(ftemp, fbtot, fblos, fne, fdl, v, dogyro=False):
@@ -304,16 +320,20 @@ def apply_losint(ftemp, fbtot, fblos, fne, fdl, v, dogyro=False):
 
     Returns
     -------
-    out : ndarray, shape (R, 6)
+    out : ndarray, shape (R, 10)
         Synthesized outputs for all rays:
         - Stokes I [K]
         - Stokes V [K]
         - Faraday rotation [rad]
         - Dispersion measure [pc cm^-3]
-        - Optical unity location [cm]
-        - Optical unity index
+        - Left-handed optical unity location [cm]
+        - Right-handed optical unity location [cm]
+        - Left-handed optical unity index
+        - Right-handed optical unity index
+        - Left-handed emissivity-weighted BLOS
+        - Right-handed emissivity-weighted BLOS
     """
-    out = np.empty((ftemp.shape[0], 6), dtype=np.float32)
+    out = np.empty((ftemp.shape[0], 10), dtype=np.float32)
     for i in prange(ftemp.shape[0]):
         out[i] = losint(ftemp[i], fbtot[i], fblos[i], fne[i], fdl[i], v, dogyro)
     return out
@@ -342,16 +362,20 @@ def range_losint(ftemp, fbtot, fblos, fne, fdl, vs, dogyro=False):
 
     Returns
     -------
-    out : ndarray, shape (F, R, 6)
+    out : ndarray, shape (F, R, 10)
         Synthesized outputs for all rays:
         - Stokes I [K]
         - Stokes V [K]
         - Faraday rotation [rad]
         - Dispersion measure [pc cm^-3]
-        - Optical unity location [cm]
-        - Optical unity index
+        - Left-handed optical unity location [cm]
+        - Right-handed optical unity location [cm]
+        - Left-handed optical unity index
+        - Right-handed optical unity index
+        - Left-handed emissivity-weighted BLOS
+        - Right-handed emissivity-weighted BLOS
     """
-    raw_imgs = np.empty((vs.shape[0], ftemp.shape[0], 6), dtype=np.float32)
+    raw_imgs = np.empty((vs.shape[0], ftemp.shape[0], 10), dtype=np.float32)
     for i in prange(vs.shape[0]):
         raw_imgs[i] = apply_losint(ftemp, fbtot, fblos, fne, fdl, vs[i], dogyro)
     return raw_imgs
@@ -366,7 +390,7 @@ class Quantity(np.ndarray):
     Attributes
     ----------
     unit : str
-        The unit of the quantity (e.g., 'K', 'cm', 'Jy/beam').
+        The unit of the quantity (e.g., 'K', 'cm', 'Jy/beam', 'idx').
     v : float or None
         Frequency in Hz, required for certain conversions (e.g., brightness temperature <-> Jy/beam).
 
@@ -399,12 +423,12 @@ class Quantity(np.ndarray):
     _UNITS[('MHz', 'GHz')] = lambda q: q * 1e-3
     _UNITS[('GHz', 'MHz')] = lambda q: q * 1e3
 
-    def __new__(cls, arr, unit:str='cm', v:np.float32|float|None=None):
+    def __new__(cls, arr, unit:str|None='cm', v:np.float32|None=None):
         obj = np.asarray(arr).view(cls)
         obj.unit = unit
         obj.v = v
         return obj
-
+    
     def __array_finalize__(self, obj):
         if obj is None: return
         self.unit = getattr(obj, 'unit', None)
@@ -434,27 +458,79 @@ class Quantity(np.ndarray):
         key = (self.unit, unit)
         if key not in self._UNITS:
             raise ValueError(f"No conversion from {key[0]} to {key[1]}")
-        if self.v is None and unit == 'Jy/beam' or self.unit == 'Jy/beam':
+        if self.v is None and (unit == 'Jy/beam' or self.unit == 'Jy/beam'):
             raise ValueError("Frequency 'v' was not provided")
         return Quantity(self._UNITS[key](self), unit, self.v)
-
-    def __float__(self):
-        if self.shape == ():
-            return float(self.item())
-        raise TypeError("Only scalar Quantity can be converted to float.")
-
+    
     def __repr__(self):
-        return f"{super().__repr__()}{self.unit}"
+        base = f"Quantity({np.asarray(self)}, unit={self.unit!r})"
+        return base
     
     def __str__(self):
         if self.shape == ():
-            return f"{np.round(float(self), 2)} {self.unit}"
+            return f"{float(self):.4g}{self.unit}"
         else:
-            return self.__repr__()
+            return f"{np.array2string(self, precision=4, suppress_small=True)} {self.unit}"
+
+
+class HandedQuantity(Quantity):
+    def __new__(cls, left: Quantity, right: Quantity, both: Quantity | None = None):
+        if both is None:
+            avg_data = (left + right) / 2
+            if np.issubdtype(left.dtype, np.integer):
+                avg_data = np.asarray(np.round(avg_data).astype(left.dtype))
+            both = Quantity(avg_data, unit=left.unit, v=left.v)
+        obj = super().__new__(cls, both, both.unit, both.v)
+        obj._left = left
+        obj._right = right
+        return obj
+    
+    def __array_finalize__(self, obj):
+        if obj is None:
+            return
+        self._left = getattr(obj, '_left', None)
+        self._right = getattr(obj, '_right', None)
+        self.unit = getattr(obj, 'unit', None)
+        self.v = getattr(obj, 'v', None)
+
+    @property
+    def left(self):
+        return self._left
+
+    @property
+    def right(self):
+        return self._right
+    
+    def to(self, unit):
+        left_conv = self.left.to(unit)
+        right_conv = self.right.to(unit)
+        both_conv = (left_conv + right_conv) / 2
+        return HandedQuantity(left_conv, right_conv, both_conv)
+
+    def reshape(self, *shape, **kwargs):
+        reshaped_both = super().reshape(*shape, **kwargs)
+        left_reshaped = self.left.reshape(*shape, **kwargs)
+        right_reshaped = self.right.reshape(*shape, **kwargs)
+        return HandedQuantity(left_reshaped, right_reshaped, reshaped_both)
+
+    def __repr__(self):
+        return f"HandedQuantity({super().__repr__()}, left={self.left}, right={self.right})"
+
+    def __getitem__(self, key):
+        sliced_both = super().__getitem__(key)
+        if not isinstance(sliced_both, Quantity):
+            sliced_both = Quantity(sliced_both, unit=self.unit, v=self.v)
+        sliced_left = self.left[key] if self.left is not None else None
+        sliced_right = self.right[key] if self.right is not None else None
+        return HandedQuantity(sliced_left, sliced_right, sliced_both)
+    
+    def __float__(self):
+        return float(self.item())
+
 
 class Image:
     """
-    Represents a synthesized image from radiative transfer, containing Stokes I, V, and other maps.
+    Represents a synthesized image from radiative transfer, containing Stokes I, V, and related physical maps.
 
     Attributes
     ----------
@@ -462,20 +538,22 @@ class Image:
         Stokes I intensity image in Kelvin.
     V : Quantity
         Stokes V (circular polarization) image in Kelvin.
-    P
-        Fractional circular polarization (V/I)
+    P : Quantity or ndarray
+        Fractional circular polarization, computed as V / I.
     faraday : Quantity
-        Faraday rotation angle in radians.
+        Faraday rotation angle map in radians.
     disp : Quantity
-        Dispersion measure in pc cm^-3.
+        Dispersion measure map in units of pc cm^-3.
     unity : Quantity
-        Optical depth unity position in cm.
-    uidx : int
-        Index of optical unity position.
+        Optical unity position [cm], representing the average of left-handed and right-handed components. Can access the .left/.right attributes of uidx to isolate left-/right-handed components.
+    uidx : Quantity
+        Optical unity position indices, representing the average of left-handed and right-handed index components. Can access the .left/.right attributes of uidx to isolate left-/right-handed components.
+    weighted_blos : Quantity
+        Emissivity-weighted BLOS, representing the average of left-handed and right-handed index components. Can access the .left/.right attributes of weighted_blos to isolate left-/right-handed components.
     shape : tuple
-        Shape of the underlying data array.
-    v : float
-        Frequency at which the image was generated
+        Shape of the underlying spatial data array (all but last dimension of input).
+    v : float or None
+        Frequency (in Hz) at which the image was generated or observed.
     """
     def __init__(self, pixels: NDArray[np.float32], v=None):
         self.I = Quantity(pixels[..., 0], 'K', v)
@@ -483,8 +561,9 @@ class Image:
         self.P = self.V/self.I
         self.faraday = Quantity(pixels[..., 2], 'rad') 
         self.disp = Quantity(pixels[..., 3], 'pc cm^-3')
-        self.unity = Quantity(pixels[..., 4], 'cm')
-        self.uidx = pixels[..., 5]
+        self.unity = HandedQuantity(Quantity(pixels[..., 6], 'cm'), Quantity(pixels[..., 4], 'cm'))
+        self.uidx = HandedQuantity(Quantity(pixels[..., 7].astype(np.int32), ''), Quantity(pixels[..., 5].astype(np.int32), ''))
+        self.weighted_blos = HandedQuantity(Quantity(pixels[..., 9], 'G'), Quantity(pixels[..., 8], 'G'))
         self.shape = pixels.shape[:-1]
         self.v = v
     
@@ -495,7 +574,7 @@ class Image:
         self.faraday = self.faraday.reshape(new_shape)
         self.disp = self.disp.reshape(new_shape)
         self.unity = self.unity.reshape(new_shape)
-        self.uidx = np.int32(self.uidx.reshape(new_shape))
+        self.uidx = self.uidx.reshape(new_shape)
         self.shape = new_shape
         return self
     
@@ -515,8 +594,21 @@ class ImageCollection(list):
         return self
     
     def _stack_attr(self, attr: str):
-        arrs = [getattr(img, attr) for img in self]
-        return np.stack(arrs)
+        attrs = [getattr(img, attr) for img in self]
+        if not attrs:
+            raise ValueError(f"ImageCollection has no images to stack attribute '{attr}'.")
+        first_attr = attrs[0]
+        unit = getattr(first_attr, 'unit', None)
+        v = getattr(first_attr, 'v', None)
+        if getattr(first_attr, 'left', None) is not None:
+            left_stack = np.stack([a.left for a in attrs])
+            right_stack = np.stack([a.right for a in attrs])
+            left_q = Quantity(left_stack, unit, v)
+            right_q = Quantity(right_stack, unit, v)
+            return HandedQuantity(left_q, right_q)
+        else:
+            stacked_values = np.stack([a.value if hasattr(a, 'value') else a for a in attrs])
+            return Quantity(stacked_values, unit, v)
     
     @property
     def v(self) -> NDArray[np.float32]:
@@ -653,19 +745,19 @@ def synthesize(rays: RayCollection, v: np.float32 | float, dogyro:bool = False) 
     """
     with Wheel("synthesizing...") as wheel:
         fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro)
-        rimg = fimg_raw.reshape(*rays.shape[:-1], 6)
+        rimg = fimg_raw.reshape(*rays.shape[:-1], 10)
     return Image(rimg, v)
 
-def synthesize_range(rays: RayCollection, frequencies: list[float] | NDArray[np.float32], dogyro: bool = False) -> ImageCollection:
+def  (rays: RayCollection, frequencies: list[float] | NDArray[np.float32], dogyro: bool = False) -> ImageCollection:
     """
-    Performs line-of-sight synthesis for a range of frequencies using threads and a spinner.
+    Performs line-of-sight synthesis for a range of frequencies.
 
     Parameters
     ----------
     rays : RayCollection
         Input ray collection with all physical parameters.
-    frequencies : list of float or ndarray
-        Frequencies in Hz at which the synthesis is performed.
+    frequencies : list | ndarray
+        Frequencies to synthesize.
     dogyro : bool, default=False
         Whether to include gyroresonance effects in the calculation.
 
@@ -674,24 +766,38 @@ def synthesize_range(rays: RayCollection, frequencies: list[float] | NDArray[np.
     ImageCollection
         A collection of synthesized images.
     """
-    # results = ImageCollection()
-    # wheel = Wheel("synthesizing...", label="frequencies")
-    # for v in wheel(frequencies):
-    #     fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro)
-    #     rimg = fimg_raw.reshape(*rays.shape[:-1], 6)
-    #     img = Image(rimg, v)
-    #     results.append(img)
-    # return results
-    result = ImageCollection()
-    farr = np.array(frequencies, dtype=np.float32)
-    with Wheel("synthesizing...") as wheel:
-        fimgs_raw = range_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, farr, dogyro)
-        rimg = fimgs_raw.reshape(farr.shape[0], *rays.shape[:-1], 6)
-    for i in range(farr.shape[0]):
-        result.append(Image(rimg[i], farr[i]))
+    results = ImageCollection()
+    wheel = Wheel("synthesizing...", label="frequencies")
+    for v in wheel(frequencies):
+        fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro)
+        rimg = fimg_raw.reshape(*rays.shape[:-1], 6)
+        img = Image(rimg, v)
+        results.append(img)
     return result
+    # parallelized version
+    # result = ImageCollection()
+    # farr = np.array(frequencies, dtype=np.float32)
+    # with Wheel("synthesizing...") as wheel:
+    #     fimgs_raw = range_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, farr, dogyro)
+    #     rimg = fimgs_raw.reshape(farr.shape[0], *rays.shape[:-1], 10)
+    # for i in range(farr.shape[0]):
+    #     result.append(Image(rimg[i], farr[i]))
+    # return result
 
 def get_spectral_idx(images: ImageCollection) -> NDArray[np.float32]:
+    """
+    Compute the spectral index from an image collection. The spectral index is defined as n = -d(log10(Tb)) / d(log10(ν))
+
+    Parameters
+    ----------
+    images : ImageCollection
+        Collection of synthesized images.
+
+    Returns
+    -------
+    spectral_idx : NDArray[np.float32]
+        Array of spectral index values per frequency image per pixel (same shape as the input images).
+    """
     vs_comp = images.v.reshape((-1,) + (1,) * len(images.shape))
     Tb = images.I
     dlogTb = np.gradient(np.log10(Tb), axis=0)
@@ -700,6 +806,22 @@ def get_spectral_idx(images: ImageCollection) -> NDArray[np.float32]:
     return spectral_idx
 
 def invert_blos(images: ImageCollection) -> NDArray[np.float32]:
+    """
+    Estimate the line-of-sight magnetic field using circular polarization and spectral index.
+
+    The inversion is based on:
+        BLOS = P * ν / (2.8e6 * n)
+
+    Parameters
+    ----------
+    images : ImageCollection
+        Collection of Stokes `I` and `V` images at different frequencies.
+
+    Returns
+    -------
+    inverted_blos : NDArray[np.float32]
+        Estimated Bₗₒₛ values for each frequency and pixel in the image collection.
+    """
     P = images.V/images.I
     ndim = images[0].V.ndim
     vs_comp = images.v.reshape((-1,) + (1,) * ndim)
@@ -707,22 +829,83 @@ def invert_blos(images: ImageCollection) -> NDArray[np.float32]:
     inverted_blos = ((P*vs_comp)/(2.8e6*spectral_idx)).astype(np.float32)
     return inverted_blos
 
-def get_quantity_at_unity(rays: RayCollection, images: Image | ImageCollection, quantity: str) -> NDArray[np.float32]:
-    if isinstance(images, ImageCollection):
-        imgs = images
-    elif isinstance(images, Image):
-        imgs = ImageCollection([images])
-    else:
-        raise TypeError("images must be an Image or an ImageCollection")
-    n_imgs = len(imgs)
-    img_shape = imgs[0].shape
-    uidx_stack = np.stack([np.int32(img.uidx) for img in imgs], axis=0)
-    cube = getattr(rays, 'f' + quantity).reshape(*img_shape, -1)
-    cube_exp = cube[None, ...]
-    indices_exp = uidx_stack[..., None]
-    selected = np.take_along_axis(cube_exp, indices_exp, axis=-1)
-    at_unity = selected[..., 0]
+def get_quantity_at_index(rays: RayCollection, quantity: str, indices: NDArray[np.int32]) -> Quantity:
+    """
+    Sample a given ray quantity at an array of indices.
+
+    Parameters
+    ----------
+    rays : RayCollection
+        Collection of ray-traced physical quantities (e.g., temperature, btot, etc.).
+    indices : ndarray
+        An array containing the indices of the ray quantities to sample.
+    quantity : str
+        Name of the quantity to sample (e.g., "temp", "blos", "btot").
+
+    Returns
+    -------
+    Quantity
+        The requested quantity sampled at the optical unity index along each ray.
+    """
+    cube = np.asarray(getattr(rays, 'f' + quantity))
+    unit = {'blos': 'G', 'ne': 'cm^-3', 'temp': 'K', 'btot': 'G', 'dl': 'cm'}.get(quantity, '')
+    indices = np.asarray(indices, dtype=np.int32)
+    original_shape = indices.shape
+    flat_indices = indices.ravel()
+    if cube.shape[0] != flat_indices.size:
+        raise ValueError(
+            f"Mismatch: f{quantity} has {cube.shape[0]} rays, but got {flat_indices.size} indices"
+        )
+    sampled = cube[np.arange(flat_indices.size), flat_indices]
+    sampled = sampled.reshape(original_shape)
+    return Quantity(sampled, unit=unit)
+
+def get_quantity_at_unity(rays: RayCollection, quantity: str, images: Image | ImageCollection):
+    """
+    Sample a given quantity at the left-/right-/average-handed unity layer for a single or collection of images.
+
+    Parameters
+    ----------
+    rays : RayCollection
+        Collection of ray-traced physical quantities.
+    quantity : str
+        Name of the quantity to sample (e.g., "temp", "blos", "btot").
+    images : Image | ImageCollection
+        A single Image or an ImageCollection containing `uidx` attributes.
+
+    Returns
+    -------
+    Quantity
+        Quantity sampled at optical unity with members `.left`, `.right` for handed components.
+    """
     if isinstance(images, Image):
-        return at_unity[0]
-    else:
-        return at_unity
+        images = ImageCollection([images])
+    left_samples = [get_quantity_at_index(rays, quantity, img.uidx.left) for img in images]
+    right_samples = [get_quantity_at_index(rays, quantity, img.uidx.right) for img in images]
+    both_samples = [get_quantity_at_index(rays, quantity, img.uidx) for img in images]
+    unit = {'blos': 'G', 'ne': 'cm^-3', 'temp': 'K', 'btot': 'G', 'dl': 'cm'}.get(quantity, '')
+    left_qty = Quantity(np.stack(left_samples), unit=unit)
+    right_qty = Quantity(np.stack(right_samples), unit=unit)
+    both_qty = Quantity(np.stack(both_samples), unit=unit)
+    return HandedQuantity(left_qty, right_qty, both=both_qty)
+
+def get_emissivity_weighted_blos(rays: RayCollection) -> Quantity:
+    """
+    Compute the emissivity-weighted average LOS magnetic field along each ray.
+    """
+    blos = rays.fblos     # shape: (n_rays, n_steps)
+    eta = rays.feta_I     # same shape
+    tau = rays.ftau       # optical depth to observer
+    dl = rays.fdl         # cm
+
+    # Compute the contribution function
+    contrib = eta * np.exp(-tau) * dl
+
+    # Numerator: ∫ B_LOS * contrib
+    weighted_blos = np.sum(blos * contrib, axis=1)
+
+    # Denominator: ∫ contrib
+    total_contrib = np.sum(contrib, axis=1)
+
+    avg_blos = weighted_blos / total_contrib
+    return Quantity(avg_blos, unit='G')
