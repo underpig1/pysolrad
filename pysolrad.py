@@ -79,7 +79,7 @@ class Wheel:
         self.stop()
 
 @njit
-def gyrotaus(v, s, ne, temp, theta_rad, dl):
+def gyrotaus(v, s, ne, temp, theta, dl):
     """
     Computes gyroresonance optical depths for X and O modes at a given harmonic.
 
@@ -93,8 +93,8 @@ def gyrotaus(v, s, ne, temp, theta_rad, dl):
         Electron number density [cm^-3].
     temp : float
         Electron temperature [K].
-    theta_rad : float
-        Angle between wavevector and magnetic field [radians].
+    theta : float
+        Angle between wave vector k and magnetic field vector [radians].
     dl : float
         Path length element [cm].
 
@@ -117,14 +117,14 @@ def gyrotaus(v, s, ne, temp, theta_rad, dl):
 
     Y = fgyro / v
     X = (fplasma / v)**2
-    delta = np.sqrt((Y * np.sin(theta_rad))**4/4.0 + (1.0 - X)**2 * (Y*np.cos(theta_rad))**2)
-    calc_tee = lambda dsgn: (-(Y * np.sin(theta_rad))**2 / 2.0 - dsgn*delta) / (Y * (1.0 - X)*np.cos(theta_rad))
+    delta = np.sqrt((Y * np.sin(theta))**4/4.0 + (1.0 - X)**2 * (Y*np.cos(theta))**2)
+    calc_tee = lambda dsgn: (-(Y * np.sin(theta))**2 / 2.0 - dsgn*delta) / (Y * (1.0 - X)*np.cos(theta))
 
     coeff = (np.pi**2 / 2.0) * 8.064e7 * ne * dl / v / cc
     factorials = (1.0, 1.0, 2.0, 6.0, 24.0, 120.0, 720.0, 5040.0)
-    base_factor = coeff * s**2 / factorials[s - 1] * (s**2 * np.sin(theta_rad)**2 * kB * temp / (2.0 * me * cc**2))**(s - 1)
+    base_factor = coeff * s**2 / factorials[s - 1] * (s**2 * np.sin(theta)**2 * kB * temp / (2.0 * me * cc**2))**(s - 1)
 
-    calc_optical_depth = lambda tee: base_factor * ((1. + tee * np.cos(theta_rad))**2 + (temp / (5.9413e9 * tee))**2) / (1. + tee**2)
+    calc_optical_depth = lambda tee: base_factor * ((1. + tee * np.cos(theta))**2 + (temp / (5.9413e9 * tee))**2) / (1. + tee**2)
     calc_gyro = lambda mode: calc_optical_depth(calc_tee(-1.0 if mode == 'x' else 1.0))
 
     taux = calc_gyro('x') if s != 1 else 0.0
@@ -171,8 +171,8 @@ def taus(blos, btot, ne, Te, dl, v, dogyro=False):
         s_eff = v / (2.8e6 * btot)
         s = int(np.round(s_eff))
         if 1 <= s <= 8 and np.abs(s - s_eff) < 0.2:
-            theta_rad = np.arccos(min(max(blos / btot, -1.0), 1.0))
-            taux, tauo = gyrotaus(v, s, ne, Te, theta_rad, dl)
+            theta = np.arccos(min(max(blos / btot, -1.0), 1.0))
+            taux, tauo = gyrotaus(v, s, ne, Te, theta, dl)
             if blos < 0:
                 taux, tauo = tauo, taux
             dtaur += taux
@@ -208,7 +208,7 @@ def radtrans(dtaur, dtaul, Te, Tbr, Tbl):
     return Tbr, Tbl
 
 @njit
-def losint(ltemp, lbtot, lblos, lne, ldl, v, dogyro=False):
+def losint(ltemp, lbtot, lblos, lne, ldl, v, dogyro=False, dounity=True):
     """
     Does line-of-sight integration for a single ray.
 
@@ -251,7 +251,6 @@ def losint(ltemp, lbtot, lblos, lne, ldl, v, dogyro=False):
     Tbr = Tbl = 3.0
     rm = disp = 0.0
     integrands = np.zeros((2, npts))
-    cfl, cfr = 0.0, 0.0
     for il in range(npts):
         ptemp = ltemp[il]
         pblos = lblos[il]
@@ -274,30 +273,166 @@ def losint(ltemp, lbtot, lblos, lne, ldl, v, dogyro=False):
     uidx_r, uidx_l = 0, 0
     taur = taul = 0.0
     num_l, denom_l, num_r, denom_r = 0.0, 0.0, 0.0, 0.0
-    for il in range(npts - 1, -1, -1):
-        ptemp = ltemp[il]
+    if dounity:
+        for il in range(npts - 1, -1, -1):
+            ptemp = ltemp[il]
+            ptemp = max(ptemp, 3)
+            pblos = lblos[il]
+            dtaur, dtaul = integrands[:, il]
+            taul += dtaul
+            taur += dtaur
+            depth += ldl[il]
+            if taur >= 1.0 and unity_r == 0.0:
+                unity_r = depth
+                uidx_r = il
+            if taul >= 1.0 and unity_l == 0.0:
+                unity_l = depth
+                uidx_l = il
+            cfl = dtaul*ptemp*np.exp(-taul)
+            cfr = dtaur*ptemp*np.exp(-taur)
+            if dtaul < 1e100:
+                num_l += pblos*cfl
+                denom_l += cfl
+            if dtaur < 1e100:
+                num_r += pblos*cfr
+                denom_r += cfr
+        unity_r, unity_l = depth - unity_r, depth - unity_l
+        weighted_blos_l = num_l/denom_l if denom_l != 0.0 else 0.0
+        weighted_blos_r = num_r/denom_r if denom_r != 0.0 else 0.0
+    return np.array((I, V, faraday, disp, unity_r, uidx_r, unity_l, uidx_l, weighted_blos_r, weighted_blos_l), dtype=np.float32)
+
+class ContributionFunction:
+    """
+    Contribution function results along a single line-of-sight.
+
+    Attributes
+    ----------
+    tau : Quantity
+        Optical depths along the LOS. You can access individual polarizations via `.left` and `.right`.
+
+    cf : Quantity
+        Contribution function (emissivity-weighted opacity) [K] along the LOS. Use `.left` or `.right` to get each polarization separately.
+
+    depth : Quantity
+        Depths from the observer toward the source along the ray [cm].
+
+    height : Quantity
+        Heights above the solar surface along the ray [cm].
+
+    tb : Quantity
+        Brightness temperature along the LOS [K]. Use `.left` and `.right` for separate polarizations.
+
+    v : Quantity
+        Observation frequency [Hz].
+    """
+    def __init__(self, taur, taul, cfr, cfl, depth, height, tbr, tbl, v):
+        self.tau = HandedQuantity(Quantity(taul, ''), Quantity(taur, ''))
+        self.cf = HandedQuantity(Quantity(cfl, 'K'), Quantity(cfr, 'K'))
+        self.depth = Quantity(depth, 'cm')
+        self.height = Quantity(height, 'cm')
+        self.tb = HandedQuantity(Quantity(tbr, 'K'), Quantity(tbl, 'K'))
+        self.v = Quantity(v, 'Hz')
+
+@njit
+def contribution_function(ltemp, lbtot, lblos, lne, ldl, v, dogyro=False):
+    """
+    Calculate arrays of optical depth, contribution function, brightness temperature, 
+    height, and depth along a single light-of-sight ray.
+
+    Parameters
+    ----------
+    ltemp : ndarray
+        Electron temperature [K] along the ray.
+    lbtot : ndarray
+        Total magnetic field strength [G] along the ray.
+    lblos : ndarray
+        Line-of-sight magnetic field component [G].
+    lne : ndarray
+        Electron number density [cm^-3].
+    ldl : ndarray
+        Path length increments along the ray [cm].
+    v : float
+        Observation frequency [Hz].
+    dogyro : bool, optional
+        Include gyroresonance absorption if True (default False).
+
+    Returns
+    -------
+    tuple of ndarrays
+        Arrays of shape (N,) for each quantity:
+        - taurs : Right circular polarization optical depth
+        - tauls : Left circular polarization optical depth
+        - cfrs : Contribution function (right pol) [K]
+        - cfls : Contribution function (left pol) [K]
+        - depths : Depth from observer along ray [cm]
+        - heights : Height above solar surface [cm]
+        - Tbrs : Brightness temperature (right pol) [K]
+        - Tbls : Brightness temperature (left pol) [K]
+    """
+    npts = ltemp.shape[0]
+    Tbr = Tbl = 3.0
+    Tbrs, Tbls = np.zeros(npts), np.zeros(npts)
+    integrands = np.zeros((2, npts))
+    height = 0.0
+    heights = np.zeros(npts)
+    for il in range(npts):
+        ptemp = max(ltemp[il], 3.0)
         pblos = lblos[il]
+        pbtot = lbtot[il]
+        pne = lne[il]
+        pdl = ldl[il]
+        heights[il] = height
+        height += pdl
+        dtaur, dtaul = taus(pblos, pbtot, pne, ptemp, pdl, v, dogyro)
+        integrands[:, il] = dtaur, dtaul
+        Tbr, Tbl = radtrans(dtaur, dtaul, ptemp, Tbr, Tbl)
+        Tbrs[il], Tbls[il] = Tbr, Tbl
+    taur = taul = 0.0
+    cfls, cfrs = np.zeros(npts), np.zeros(npts)
+    tauls, taurs = np.zeros(npts), np.zeros(npts)
+    depth = 0.0
+    depths = np.zeros(npts)
+    for il in range(npts - 1, -1, -1):
+        ptemp = max(ltemp[il], 3.0)
+        pblos = lblos[il]
+        pbtot = lbtot[il]
+        pne = lne[il]
+        pdl = ldl[il]
+        depth += pdl
+        depths[il] = depth
         dtaur, dtaul = integrands[:, il]
         taul += dtaul
         taur += dtaur
-        depth += ldl[il]
-        if taur >= 1.0 and unity_r == 0.0:
-            unity_r = depth
-            uidx_r = il
-        if taul >= 1.0 and unity_l == 0.0:
-            unity_l = depth
-            uidx_l = il
-        num_l += pblos*dtaul*ptemp*np.exp(-taul)
-        denom_l += dtaul*ptemp*np.exp(-taul)
-        num_r += pblos*dtaur*ptemp*np.exp(-taur)
-        denom_r += dtaur*ptemp*np.exp(-taur)
-    unity_r, unity_l = depth - unity_r, depth - unity_l
-    weighted_blos_l = num_l/denom_l
-    weighted_blos_r = num_r/denom_r
-    return np.array((I, V, faraday, disp, unity_r, uidx_r, unity_l, uidx_l, weighted_blos_r, weighted_blos_l), dtype=np.float32)
+        tauls[il] = taul
+        cfls[il] = dtaul*ptemp * np.exp(-taul)/pdl
+        taurs[il] = taur
+        cfrs[il] = dtaur*ptemp * np.exp(-taur)/pdl
+    return taurs, tauls, cfrs, cfls, depths, heights, Tbrs, Tbls
+
+def get_contribution_function(rays, v:float | int | np.float32, dogyro=False):
+    """
+    Calculate the contribution function, cumulative optical depth, height, and brightness temperature values for each position along a single line-of-sight.
+
+    Parameters
+    ----------
+    rays : RayCollection
+        A RayCollection for a **single line-of-sight**.
+    v : float or int or np.float32
+        Observation frequency [Hz].
+    dogyro : bool, optional
+        Whether to include gyroresonance absorption (default False).
+
+    Returns
+    -------
+    ContributionFunction
+        Contains contribution function results and related polarized quantities for plotting.
+    """
+    assert rays.ftemp.shape[0] == 1 and rays.ftemp.ndim == 2, "Can only get contribution function for a RayCollection with a single line-of-sight"
+    raw = contribution_function(rays.ftemp[0], rays.fbtot[0], rays.fblos[0], rays.fne[0], rays.fdl[0], v, dogyro)
+    return ContributionFunction(raw[0], raw[1], raw[2], raw[3], raw[4], raw[5], raw[6], raw[7], v)
 
 @njit(parallel=True)
-def apply_losint(ftemp, fbtot, fblos, fne, fdl, v, dogyro=False):
+def apply_losint(ftemp, fbtot, fblos, fne, fdl, v, dogyro=False, dounity=True):
     """
     Parallelized line-of-sight synthesis for multiple rays.
 
@@ -317,6 +452,8 @@ def apply_losint(ftemp, fbtot, fblos, fne, fdl, v, dogyro=False):
         Wave frequency [Hz].
     dogyro : bool, optional
         Whether to include gyroresonance absorption (default False).
+    dounity : bool, optional
+        Whether to do optical unity/emissivity-weighted BLOS calculations (default True).
 
     Returns
     -------
@@ -335,11 +472,11 @@ def apply_losint(ftemp, fbtot, fblos, fne, fdl, v, dogyro=False):
     """
     out = np.empty((ftemp.shape[0], 10), dtype=np.float32)
     for i in prange(ftemp.shape[0]):
-        out[i] = losint(ftemp[i], fbtot[i], fblos[i], fne[i], fdl[i], v, dogyro)
+        out[i] = losint(ftemp[i], fbtot[i], fblos[i], fne[i], fdl[i], v, dogyro, dounity)
     return out
 
 @njit(parallel=True)
-def range_losint(ftemp, fbtot, fblos, fne, fdl, vs, dogyro=False):
+def range_losint(ftemp, fbtot, fblos, fne, fdl, vs, dogyro=False, dounity=False):
     """
     Parallelized line-of-sight synthesis for multiple frequencies.
 
@@ -359,6 +496,8 @@ def range_losint(ftemp, fbtot, fblos, fne, fdl, vs, dogyro=False):
         Wave frequencies to synthesize [Hz].
     dogyro : bool, optional
         Whether to include gyroresonance absorption (default False).
+    dounity : bool, optional
+        Whether to do optical unity/emissivity-weighted BLOS calculations (default True).
 
     Returns
     -------
@@ -377,7 +516,7 @@ def range_losint(ftemp, fbtot, fblos, fne, fdl, vs, dogyro=False):
     """
     raw_imgs = np.empty((vs.shape[0], ftemp.shape[0], 10), dtype=np.float32)
     for i in prange(vs.shape[0]):
-        raw_imgs[i] = apply_losint(ftemp, fbtot, fblos, fne, fdl, vs[i], dogyro)
+        raw_imgs[i] = apply_losint(ftemp, fbtot, fblos, fne, fdl, vs[i], dogyro, dounity)
     return raw_imgs
 
 kB = 1.38e-16 # erg/K
@@ -575,12 +714,13 @@ class Image:
         self.disp = self.disp.reshape(new_shape)
         self.unity = self.unity.reshape(new_shape)
         self.uidx = self.uidx.reshape(new_shape)
+        self.weighted_blos = self.weighted_blos.reshape(new_shape)
         self.shape = new_shape
         return self
     
 class ImageCollection(list):
     """
-    A container class for managing multiple Image instances at different frequencies. Supports vectorized operations on images.
+    A container class for managing multiple Image instances at different frequencies. Supports vectorized operations on images. (eg. calling images.I[0] is the same as images[0].I)
     """
     def __init__(self, images: list[Image] | None = None):
         super().__init__(images or [])
@@ -651,6 +791,10 @@ class ImageCollection(list):
         return self._stack_attr('uidx')
     
     @property
+    def weighted_blos(self):
+        return self._stack_attr('weighted_blos')
+    
+    @property
     def shape(self):
         if len(self) == 0:
             raise ValueError("ImageCollection is empty, shape is undefined.")
@@ -658,7 +802,7 @@ class ImageCollection(list):
 
 class RayCollection:
     """
-    Holds a collection of rays along which radiative transfer will be computed.
+    Holds a collection of rays along which radiative transfer will be computed. 
 
     Attributes
     ----------
@@ -682,17 +826,17 @@ class RayCollection:
         Parameters
         ----------
         temp : ndarray
-            Electron temperature array.
+            Electron temperature array from the surface (i=0) to the observer.
         btot : ndarray
             Total magnetic field strength array.
         blos : ndarray
-            Line-of-sight magnetic field strength array.
+            Line-of-sight magnetic field strength array from the surface (i=0) to the observer.
         ne : ndarray
-            Electron density array.
+            Electron density array from the surface (i=0) to the observer.
         dl : float or ndarray
-            Path length per voxel along the integration direction.
+            Path length per voxel along the integration direction from the surface (i=0) to the observer.
         axis : int, default=-1
-            Axis along which to integrate (e.g., line-of-sight). A value of -1 (default) indicates last axis.
+            Axis along which to integrate (i.e. line-of-sight axis). A value of -1 (default) indicates last axis.
         """
         shape = temp.shape
         assert btot.shape == shape, "Quantities have mismatched shapes"
@@ -725,7 +869,7 @@ class RayCollection:
         new_shape = (leading, trailing)
         return arr_moved.reshape(new_shape)
 
-def synthesize(rays: RayCollection, v: np.float32 | float, dogyro:bool = False) -> Image:
+def synthesize(rays: RayCollection, v: np.float32 | float, dogyro:bool = False, dounity:bool = True) -> Image:
     """
     Performs line-of-sight synthesis at a single frequency to compute a multi-channel image.
 
@@ -735,8 +879,10 @@ def synthesize(rays: RayCollection, v: np.float32 | float, dogyro:bool = False) 
         Input ray collection with all physical parameters.
     v : float
         Frequency in Hz at which the synthesis is performed.
-    dogyro : bool, default=False
-        Whether to include gyroresonance effects in the calculation.
+    dogyro : bool, optional
+        Whether to include gyroresonance effects in the calculation (default False).
+    dounity : bool, optional
+        Whether to do optical unity/emissivity-weighted BLOS calculations (default True).
 
     Returns
     -------
@@ -744,11 +890,11 @@ def synthesize(rays: RayCollection, v: np.float32 | float, dogyro:bool = False) 
         A 2D multi-channel image object containing Stokes I, V, Faraday rotation, dispersion, and optical unity position/index.
     """
     with Wheel("synthesizing...") as wheel:
-        fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro)
+        fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro, dounity)
         rimg = fimg_raw.reshape(*rays.shape[:-1], 10)
     return Image(rimg, v)
 
-def synthesize_range(rays: RayCollection, frequencies: list[float] | NDArray[np.float32], dogyro: bool = False) -> ImageCollection:
+def synthesize_range(rays: RayCollection, frequencies: list[float] | NDArray[np.float32], dogyro: bool = False, dounity:bool=True) -> ImageCollection:
     """
     Performs line-of-sight synthesis for a range of frequencies.
 
@@ -758,8 +904,10 @@ def synthesize_range(rays: RayCollection, frequencies: list[float] | NDArray[np.
         Input ray collection with all physical parameters.
     frequencies : list | ndarray
         Frequencies to synthesize.
-    dogyro : bool, default=False
-        Whether to include gyroresonance effects in the calculation.
+    dogyro : bool
+        Whether to include gyroresonance effects in the calculation (default False).
+    dounity : bool, optional
+        Whether to do optical unity/emissivity-weighted BLOS calculations (default True).
 
     Returns
     -------
@@ -769,7 +917,7 @@ def synthesize_range(rays: RayCollection, frequencies: list[float] | NDArray[np.
     results = ImageCollection()
     wheel = Wheel("synthesizing...", label="frequencies")
     for v in wheel(frequencies):
-        fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro)
+        fimg_raw = apply_losint(rays.ftemp, rays.fbtot, rays.fblos, rays.fne, rays.fdl, v, dogyro, dounity)
         rimg = fimg_raw.reshape(*rays.shape[:-1], 10)
         img = Image(rimg, v)
         results.append(img)
