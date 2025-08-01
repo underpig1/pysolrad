@@ -1,6 +1,6 @@
-models/MURaM/
+models/MURaM/sunspot/*
 models/MURaM.7z
 *.pyc
-models/MAS
+models/MAS/*
+!models/MAS/mas.py
 models/MAS.7z
-out

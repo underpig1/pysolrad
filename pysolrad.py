@@ -1037,24 +1037,3 @@ def get_quantity_at_unity(rays: RayCollection, quantity: str, images: Image | Im
     right_qty = Quantity(np.stack(right_samples), unit=unit)
     both_qty = Quantity(np.stack(both_samples), unit=unit)
     return HandedQuantity(left_qty, right_qty, both=both_qty)
-
-def get_emissivity_weighted_blos(rays: RayCollection) -> Quantity:
-    """
-    Compute the emissivity-weighted average LOS magnetic field along each ray.
-    """
-    blos = rays.fblos     # shape: (n_rays, n_steps)
-    eta = rays.feta_I     # same shape
-    tau = rays.ftau       # optical depth to observer
-    dl = rays.fdl         # cm
-
-    # Compute the contribution function
-    contrib = eta * np.exp(-tau) * dl
-
-    # Numerator: ∫ B_LOS * contrib
-    weighted_blos = np.sum(blos * contrib, axis=1)
-
-    # Denominator: ∫ contrib
-    total_contrib = np.sum(contrib, axis=1)
-
-    avg_blos = weighted_blos / total_contrib
-    return Quantity(avg_blos, unit='G')
