@@ -1,4 +1,4 @@
-# Models and Download Instructions
+# Models
 
 This folder contains pre-built solar atmospheric models for forward synthesis
 
